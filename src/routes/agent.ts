@@ -147,6 +147,8 @@ agentRouter.post('/start', async (req: Request, res: Response) => {
             ...quickClassify(bestPool),
           },
           transaction: prepared.serializedTx,
+          // For wide positions (>69 bins), multiple txs need sequential signing
+          serializedTxs: prepared.serializedTxs,
           positionPubkey: prepared.positionPubkey,
           strategy: prepared.strategy,
           blockhash: prepared.blockhash,

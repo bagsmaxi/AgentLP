@@ -307,11 +307,12 @@ export async function optimizeStrategy(
     });
   }
 
-  // Meteora DLMM: default position account holds 70 bins max (DEFAULT_BIN_PER_POSITION=70)
-  // Cap at 69 to stay within single position limits
-  const MAX_BINS = 69;
+  // Meteora DLMM: POSITION_MAX_LENGTH = 1400 bins max per position.
+  // Positions > 69 bins require multi-step creation (init → resize → add liquidity)
+  // due to Solana's 10KB-per-instruction realloc limit. MeteoraService handles this.
+  const MAX_BINS = 1400;
   if (binRangeWidth > MAX_BINS) {
-    logger.info('Capping bin range to Meteora max', {
+    logger.info('Capping bin range to Meteora POSITION_MAX_LENGTH', {
       requested: binRangeWidth,
       capped: MAX_BINS,
     });

@@ -119,7 +119,7 @@ export async function preparePositionTransaction(params: {
   walletAddress: string;
   isRebalance?: boolean;
   rebalanceCtx?: RebalanceContext;
-}): Promise<PreparedTransaction & { depositFeeSol?: number }> {
+}): Promise<PreparedTransaction & { depositFeeSol?: number; serializedTxs?: string[] }> {
   const { pool, solAmount, walletAddress, isRebalance = false, rebalanceCtx } = params;
 
   const strategy = await optimizeStrategy(pool, rebalanceCtx);
@@ -148,7 +148,8 @@ export async function preparePositionTransaction(params: {
     skipSimulation: isRebalance,
   });
 
-  if (!result.serializedTx) {
+  // Wide positions return serializedTxs (array), narrow positions return serializedTx (string)
+  if (!result.serializedTx && (!result.serializedTxs || result.serializedTxs.length === 0)) {
     throw new Error('Failed to serialize transaction');
   }
 
@@ -169,7 +170,8 @@ export async function preparePositionTransaction(params: {
   }
 
   return {
-    serializedTx: result.serializedTx,
+    serializedTx: result.serializedTx || result.serializedTxs?.[0] || '',
+    serializedTxs: result.serializedTxs,
     positionPubkey: result.positionPubkey,
     poolAddress: pool.address,
     strategy,

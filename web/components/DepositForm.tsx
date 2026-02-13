@@ -58,32 +58,49 @@ export function DepositForm() {
       });
       setStatusMsg(`Best pool: ${data.selectedPool?.name}. Preparing transaction...`);
 
-      // If we got a serialized transaction, send it to wallet for signing
-      if (data.transaction || data.serializedTx) {
-        const txBase64 = data.transaction || data.serializedTx;
+      // If we got serialized transaction(s), send to wallet for signing
+      const txList: string[] = data.serializedTxs || (data.transaction || data.serializedTx ? [data.transaction || data.serializedTx] : []);
 
-        setStatus('awaiting_sign');
-        setStatusMsg('Please approve the transaction in your wallet...');
+      if (txList.length > 0) {
+        const isMultiTx = txList.length > 1;
+        let lastSignature = '';
 
-        const txBuffer = Buffer.from(txBase64, 'base64');
-        const transaction = Transaction.from(txBuffer);
+        for (let i = 0; i < txList.length; i++) {
+          const txBase64 = txList[i];
 
-        const signature = await sendTransaction(transaction, connection, {
-          maxRetries: 3,
-        });
+          if (isMultiTx) {
+            setStatus('awaiting_sign');
+            setStatusMsg(`Approve transaction ${i + 1} of ${txList.length} in your wallet...`);
+          } else {
+            setStatus('awaiting_sign');
+            setStatusMsg('Please approve the transaction in your wallet...');
+          }
 
-        setStatus('confirming');
-        setStatusMsg(`Transaction sent! Confirming... (${signature.slice(0, 8)}...)`);
+          const txBuffer = Buffer.from(txBase64, 'base64');
+          const transaction = Transaction.from(txBuffer);
 
-        const blockhash = data.blockhash || transaction.recentBlockhash!;
-        const lastValidBlockHeight = data.lastValidBlockHeight
-          || (await connection.getLatestBlockhash('confirmed')).lastValidBlockHeight;
+          const signature = await sendTransaction(transaction, connection, {
+            maxRetries: 3,
+          });
+          lastSignature = signature;
 
-        await connection.confirmTransaction({
-          signature,
-          blockhash,
-          lastValidBlockHeight,
-        }, 'confirmed');
+          setStatus('confirming');
+          setStatusMsg(
+            isMultiTx
+              ? `Confirming transaction ${i + 1} of ${txList.length}...`
+              : `Transaction sent! Confirming... (${signature.slice(0, 8)}...)`
+          );
+
+          const blockhash = data.blockhash || transaction.recentBlockhash!;
+          const lastValidBlockHeight = data.lastValidBlockHeight
+            || (await connection.getLatestBlockhash('confirmed')).lastValidBlockHeight;
+
+          await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight,
+          }, 'confirmed');
+        }
 
         const poolInfo = data.selectedPool;
         await confirmPosition({
@@ -100,9 +117,10 @@ export function DepositForm() {
 
         setStatus('success');
         setStatusMsg(
-          `Position created in ${poolInfo.name}! Strategy: ${data.strategy?.strategyType || 'auto'}`
+          `Position created in ${poolInfo.name}! Strategy: ${data.strategy?.strategyType || 'auto'}` +
+          (isMultiTx ? ` (${txList.length} transactions)` : '')
         );
-        setResultData({ signature, pool: poolInfo, strategy: data.strategy });
+        setResultData({ signature: lastSignature, pool: poolInfo, strategy: data.strategy });
       } else if (data.signature) {
         setStatus('success');
         setStatusMsg(`Position created! Signature: ${data.signature.slice(0, 16)}...`);

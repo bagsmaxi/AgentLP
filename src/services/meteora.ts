@@ -1,9 +1,13 @@
 import DLMM, { StrategyType } from '@meteora-ag/dlmm';
-import { Connection, Keypair, PublicKey, Transaction, TransactionInstruction } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, SYSVAR_RENT_PUBKEY, ComputeBudgetProgram } from '@solana/web3.js';
 import BN from 'bn.js';
 import { getConnection, signAndSendTransaction, serializeTransaction, solToLamports } from './solana';
 import { StrategyConfig, StrategyName } from '../types';
 import { logger } from '../utils/logger';
+
+// DLMM SDK constants
+const SINGLE_TX_BIN_LIMIT = 69;  // Max bins for single-tx init (DEFAULT_BIN_PER_POSITION - 1)
+const MAX_RESIZE_PER_IX = 91;     // MAX_RESIZE_LENGTH from SDK
 
 // Map our strategy names to DLMM SDK numeric StrategyType enum (Spot=0, Curve=1, BidAsk=2)
 const STRATEGY_TYPE_MAP: Record<StrategyName, StrategyType> = {
@@ -77,7 +81,14 @@ export class MeteoraService {
     slippage?: number;
     extraInstructions?: TransactionInstruction[];
     skipSimulation?: boolean;
-  }): Promise<{ signature?: string; serializedTx?: string; positionPubkey: string; blockhash?: string; lastValidBlockHeight?: number }> {
+  }): Promise<{
+    signature?: string;
+    serializedTx?: string;
+    serializedTxs?: string[];
+    positionPubkey: string;
+    blockhash?: string;
+    lastValidBlockHeight?: number;
+  }> {
     const {
       pool,
       solAmountLamports,
@@ -85,17 +96,12 @@ export class MeteoraService {
       strategy,
       userPubkey,
       keypair,
-      slippage = 100, // 1% default slippage
+      slippage = 100,
       extraInstructions = [],
       skipSimulation = false,
     } = params;
 
-    // Generate new position keypair
-    const positionKeypair = Keypair.generate();
-    const positionPubkey = positionKeypair.publicKey;
-
-    const totalXAmount = solSide === 'X' ? new BN(solAmountLamports) : new BN(0);
-    const totalYAmount = solSide === 'Y' ? new BN(solAmountLamports) : new BN(0);
+    const binCount = strategy.maxBinId - strategy.minBinId + 1;
 
     logger.info('Creating position', {
       pool: pool.pubkey.toBase58(),
@@ -103,9 +109,29 @@ export class MeteoraService {
       solSide,
       strategy: strategy.strategyType,
       binRange: `${strategy.minBinId} - ${strategy.maxBinId}`,
+      binCount,
+      widePosition: binCount > SINGLE_TX_BIN_LIMIT,
     });
 
-    // For single-sided: singleSidedX=true when SOL is X (depositing only X side)
+    // Wide positions (>69 bins) need multi-step: init → resize → addLiquidity
+    if (binCount > SINGLE_TX_BIN_LIMIT) {
+      return this.createWidePosition({
+        pool,
+        solAmountLamports,
+        solSide,
+        strategy,
+        userPubkey,
+        slippage,
+        extraInstructions,
+      });
+    }
+
+    // Standard single-tx path for positions ≤ 69 bins
+    const positionKeypair = Keypair.generate();
+    const positionPubkey = positionKeypair.publicKey;
+
+    const totalXAmount = solSide === 'X' ? new BN(solAmountLamports) : new BN(0);
+    const totalYAmount = solSide === 'Y' ? new BN(solAmountLamports) : new BN(0);
     const isSingleSidedX = solSide === 'X';
 
     const tx = await pool.initializePositionAndAddLiquidityByStrategy({
@@ -125,7 +151,6 @@ export class MeteoraService {
     const conn = getConnection();
     const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash('confirmed');
 
-    // Append any extra instructions (e.g., deposit fee transfer) to the transaction
     if (tx instanceof Transaction && extraInstructions.length > 0) {
       for (const ix of extraInstructions) {
         tx.add(ix);
@@ -133,7 +158,6 @@ export class MeteoraService {
     }
 
     if (keypair) {
-      // Auto-sign mode: set blockhash, partial sign position keypair, then sign + send with wallet keypair
       if (tx instanceof Transaction) {
         tx.recentBlockhash = blockhash;
         tx.lastValidBlockHeight = lastValidBlockHeight;
@@ -145,15 +169,12 @@ export class MeteoraService {
       }
     }
 
-    // Wallet adapter mode: set blockhash + feePayer BEFORE partial signing
     if (tx instanceof Transaction) {
       tx.recentBlockhash = blockhash;
       tx.lastValidBlockHeight = lastValidBlockHeight;
       tx.feePayer = userPubkey;
       tx.partialSign(positionKeypair);
 
-      // Simulate the transaction to catch errors before sending to client
-      // Skip simulation for rebalance: SOL is still locked in old position at build time
       if (!skipSimulation) {
         try {
           const simulation = await conn.simulateTransaction(tx);
@@ -169,7 +190,6 @@ export class MeteoraService {
             throw new Error(`Transaction simulation failed: ${errStr}`);
           }
         } catch (simErr: any) {
-          // Re-throw our custom errors, catch simulation infrastructure errors
           if (simErr.message.includes('Insufficient SOL') || simErr.message.includes('simulation failed')) {
             throw simErr;
           }
@@ -187,6 +207,165 @@ export class MeteoraService {
     }
 
     throw new Error('Unexpected transaction format from DLMM SDK');
+  }
+
+  /**
+   * Create a wide position (>69 bins) using multi-step approach.
+   *
+   * Solana's 10KB-per-instruction realloc limit means positions can only be
+   * initialized with ~69 bins in a single instruction. For wider positions:
+   *   1. Transaction 1: Initialize position with 69 bins
+   *   2. Transaction 2+: Resize position in chunks of 91 bins (MAX_RESIZE_LENGTH)
+   *   3. Final Transaction: Add liquidity to the full range via addLiquidityByStrategy
+   *
+   * All transactions are built upfront and returned as serializedTxs array.
+   * The frontend signs and confirms them sequentially.
+   */
+  private async createWidePosition(params: {
+    pool: DLMM;
+    solAmountLamports: number;
+    solSide: 'X' | 'Y';
+    strategy: StrategyConfig;
+    userPubkey: PublicKey;
+    slippage: number;
+    extraInstructions: TransactionInstruction[];
+  }): Promise<{
+    serializedTxs: string[];
+    positionPubkey: string;
+    blockhash: string;
+    lastValidBlockHeight: number;
+  }> {
+    const { pool, solAmountLamports, solSide, strategy, userPubkey, slippage, extraInstructions } = params;
+
+    const positionKeypair = Keypair.generate();
+    const positionPubkey = positionKeypair.publicKey;
+    const binCount = strategy.maxBinId - strategy.minBinId + 1;
+    const isSingleSidedX = solSide === 'X';
+
+    // Determine init range (69 bins from the starting end of our range)
+    // For SOL X (bins above active): init lower portion, resize upper
+    // For SOL Y (bins below active): init upper portion, resize lower
+    const initWidth = SINGLE_TX_BIN_LIMIT;
+    let initMinBinId: number;
+    let resizeSide: number; // 0=lower (extend down), 1=upper (extend up)
+
+    if (solSide === 'X') {
+      initMinBinId = strategy.minBinId;
+      resizeSide = 1; // extend upper to reach strategy.maxBinId
+    } else {
+      initMinBinId = strategy.maxBinId - initWidth + 1;
+      resizeSide = 0; // extend lower to reach strategy.minBinId
+    }
+
+    const conn = getConnection();
+    const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash('confirmed');
+    const transactions: Transaction[] = [];
+
+    // ── Transaction 1: Initialize position with 69 bins ──
+    // Uses the SDK's combined init+addLiquidity but with 0 amounts (just create the position)
+    // This handles bin array initialization for the initial range
+    const initTx = new Transaction();
+
+    // Set compute budget for init
+    initTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }));
+
+    // Build initializePosition instruction via the pool's program
+    const initIx = await (pool as any).program.methods
+      .initializePosition(initMinBinId, initWidth)
+      .accountsPartial({
+        payer: userPubkey,
+        position: positionPubkey,
+        lbPair: pool.pubkey,
+        owner: userPubkey,
+        rent: SYSVAR_RENT_PUBKEY,
+      })
+      .instruction();
+    initTx.add(initIx);
+
+    // Add extra instructions (e.g., deposit fee transfer) to the init tx
+    for (const ix of extraInstructions) {
+      initTx.add(ix);
+    }
+
+    initTx.recentBlockhash = blockhash;
+    initTx.lastValidBlockHeight = lastValidBlockHeight;
+    initTx.feePayer = userPubkey;
+    initTx.partialSign(positionKeypair);
+    transactions.push(initTx);
+
+    // ── Transaction(s) 2+: Resize position to full width ──
+    const extraBins = binCount - initWidth;
+    if (extraBins > 0) {
+      let remaining = extraBins;
+      while (remaining > 0) {
+        const chunk = Math.min(remaining, MAX_RESIZE_PER_IX);
+
+        const resizeTx = new Transaction();
+        resizeTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
+
+        const resizeIx = await (pool as any).program.methods
+          .increasePositionLength(chunk, resizeSide)
+          .accountsPartial({
+            lbPair: pool.pubkey,
+            position: positionPubkey,
+            owner: userPubkey,
+            funder: userPubkey,
+          })
+          .instruction();
+        resizeTx.add(resizeIx);
+
+        resizeTx.recentBlockhash = blockhash;
+        resizeTx.lastValidBlockHeight = lastValidBlockHeight;
+        resizeTx.feePayer = userPubkey;
+        transactions.push(resizeTx);
+
+        remaining -= chunk;
+      }
+    }
+
+    // ── Final Transaction: Add liquidity to full range ──
+    const totalXAmount = solSide === 'X' ? new BN(solAmountLamports) : new BN(0);
+    const totalYAmount = solSide === 'Y' ? new BN(solAmountLamports) : new BN(0);
+
+    const addLiqTx = await pool.addLiquidityByStrategy({
+      positionPubKey: positionPubkey,
+      totalXAmount,
+      totalYAmount,
+      strategy: {
+        minBinId: strategy.minBinId,
+        maxBinId: strategy.maxBinId,
+        strategyType: STRATEGY_TYPE_MAP[strategy.strategyType],
+        singleSidedX: isSingleSidedX,
+      },
+      user: userPubkey,
+      slippage,
+    });
+
+    if (addLiqTx instanceof Transaction) {
+      addLiqTx.recentBlockhash = blockhash;
+      addLiqTx.lastValidBlockHeight = lastValidBlockHeight;
+      addLiqTx.feePayer = userPubkey;
+      transactions.push(addLiqTx);
+    }
+
+    // Serialize all transactions
+    const serializedTxs = transactions.map(tx => serializeTransaction(tx));
+
+    logger.info('Wide position built', {
+      pool: pool.pubkey.toBase58(),
+      binCount,
+      initWidth,
+      resizeSteps: Math.ceil(extraBins / MAX_RESIZE_PER_IX),
+      totalTransactions: transactions.length,
+      positionPubkey: positionPubkey.toBase58(),
+    });
+
+    return {
+      serializedTxs,
+      positionPubkey: positionPubkey.toBase58(),
+      blockhash,
+      lastValidBlockHeight,
+    };
   }
 
   /**

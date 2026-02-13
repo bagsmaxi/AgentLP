@@ -56,20 +56,28 @@ const LPCLAW_SYSTEM_PROMPT = `You are the LPCLAW AI analyst — an expert in Met
 
 ## Meteora DLMM Background
 - Meteora DLMM pools use concentrated liquidity with discrete price bins
-- Each pool has a bin step (price increment between bins). Higher bin step = more volatile pair
+- Each pool has a bin step (basis points price increment between bins). binStep 80 = 0.80% per bin
 - LPs deposit into a range of bins and earn fees only when price is in their range
 - Single-sided deposits: you deposit only SOL on one side of the active price
+- Position max width: 1400 bins (POSITION_MAX_LENGTH). Positions > 69 bins use multi-step creation
+- Price range covered = binCount × binStep basis points. Example: 200 bins × 80bp = 160% price range
 
 ## Strategy Types
-- Spot (ID 0): Uniform distribution. Best for stable/low-vol pairs (binStep 1-5). Bin width: 50-70
-- Curve (ID 1): Bell curve around active price. Best for medium-vol pairs (binStep 6-30). Bin width: 35-50
-- BidAsk (ID 2): Concentrated on one side. Best for high-vol/memecoins (binStep 31+). Bin width: 25-42
+- Spot (ID 0): Uniform distribution. Best for stable/low-vol pairs (binStep 1-5)
+- Curve (ID 1): Bell curve around active price. Best for medium-vol pairs (binStep 6-30)
+- BidAsk (ID 2): Concentrated on one side. Best for high-vol/memecoins (binStep 31+)
+
+## Bin Width Recommendations
+For low-vol (binStep 1-5): 50-70 bins
+For medium-vol (binStep 6-30): 35-60 bins
+For high-vol (binStep 31-60): 35-80 bins
+For extreme-vol (binStep 61+): 69-300 bins (wider = less rebalancing needed)
 
 ## Volume Momentum (multi-signal: 1h intensity, 4h intensity, APR, volume/liquidity ratio)
-- PARABOLIC (momentum >= 0.8): Token ripping — need 150%+ price range coverage. Recommend 150-250 bins for extreme binStep pools
-- HOT (momentum >= 0.5): Very active trending — need wide range. Recommend 100-180 bins for high binStep
-- RISING (momentum >= 0.3): Moderately active — wider than base. Recommend 50-100 bins
-- CALM: Use base bin range
+- PARABOLIC (momentum >= 0.8): Token ripping — need 150%+ price range coverage. Recommend 150-300 bins for extreme binStep pools
+- HOT (momentum >= 0.5): Very active trending — need wide range. Recommend 100-200 bins for high binStep
+- RISING (momentum >= 0.3): Moderately active — wider than base. Recommend 69-120 bins
+- CALM: Use base bin range (35-69 depending on volatility)
 - For memecoins with binStep 80+, ALWAYS use very wide ranges (100+ bins minimum)
 
 ## Pool Health Evaluation
@@ -273,17 +281,23 @@ ${rebalanceSection}
 
 IMPORTANT: For ${momentumLabel} tokens, recommend WIDER bin ranges to avoid going out of range.
 ${rebalanceCtx ? 'THIS IS A REBALANCE — the previous range was too narrow. Go MUCH wider.' : ''}
-For binStep ${pool.binStep} pools:
+For binStep ${pool.binStep} pools (each bin = ${(pool.binStep / 100).toFixed(2)}% price movement):
 ${pool.binStep >= 60 ? `- This is an EXTREME volatility pool (memecoin). Minimum 69 bins baseline.
-- PARABOLIC: 150-250 bins (120-200% price range)
-- HOT: 100-180 bins
-- RISING: 69-100 bins
-- CALM: 69 bins` : `- Spot: 50-70 bins (widen for momentum)
-- Curve: 35-50 bins (widen for momentum)
-- BidAsk: 25-42 bins (widen for momentum)`}
+- PARABOLIC: 150-300 bins (${(150 * pool.binStep / 100).toFixed(0)}-${(300 * pool.binStep / 100).toFixed(0)}% price range)
+- HOT: 100-200 bins
+- RISING: 69-120 bins
+- CALM: 69 bins` : pool.binStep >= 30 ? `- High volatility pool.
+- PARABOLIC: 80-150 bins
+- HOT: 60-100 bins
+- RISING: 40-69 bins
+- CALM: 35 bins` : `- Spot: 50-70 bins (widen for momentum)
+- Curve: 35-60 bins (widen for momentum)
+- BidAsk: 30-50 bins (widen for momentum)`}
+
+Max position width is 1400 bins. Wider is safer (less rebalancing) but dilutes fee concentration.
 
 Respond with ONLY this JSON:
-{"strategyType":"Spot|Curve|BidAsk","binRangeWidth":30,"reasoning":"brief","confidence":0.80}`;
+{"strategyType":"Spot|Curve|BidAsk","binRangeWidth":69,"reasoning":"brief","confidence":0.80}`;
 
     logger.info('Querying Claude AI for strategy', { pool: pool.name });
     const response = await queryClaude(prompt);
@@ -296,8 +310,8 @@ Respond with ONLY this JSON:
       return null;
     }
 
-    // Validate bin range
-    if (result.binRangeWidth < 4 || result.binRangeWidth > 69) {
+    // Validate bin range (POSITION_MAX_LENGTH = 1400)
+    if (result.binRangeWidth < 4 || result.binRangeWidth > 1400) {
       logger.warn('AI returned out-of-range bin width', { width: result.binRangeWidth });
       return null;
     }
