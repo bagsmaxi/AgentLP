@@ -9,4 +9,6 @@ web/.next/
 web/node_modules/
 .next/
 .claude/
+.vercel/
 nul
+*.log
