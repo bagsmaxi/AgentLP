@@ -297,7 +297,7 @@ Respond with ONLY this JSON:
     }
 
     // Validate bin range
-    if (result.binRangeWidth < 4 || result.binRangeWidth > 250) {
+    if (result.binRangeWidth < 4 || result.binRangeWidth > 69) {
       logger.warn('AI returned out-of-range bin width', { width: result.binRangeWidth });
       return null;
     }

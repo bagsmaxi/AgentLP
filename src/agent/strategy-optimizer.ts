@@ -27,6 +27,7 @@ function classifyVolatility(pool: ScoredPool): VolatilityClass {
  * Example: 69 bins × 80bp = 55.2% price range for extreme tokens
  */
 function getBaseBinRangeWidth(volatility: VolatilityClass): number {
+  // Max 69 bins per position (Meteora DEFAULT_BIN_PER_POSITION = 70)
   switch (volatility) {
     case 'low':
       return 60;     // stables: 60 bins × ~1-5bp = 0.6-3% range
@@ -35,7 +36,7 @@ function getBaseBinRangeWidth(volatility: VolatilityClass): number {
     case 'high':
       return 35;     // volatile: 35 bins × ~50-60bp = 17.5-21% range
     case 'extreme':
-      return 69;     // memecoins: 69 bins × ~80-100bp = 55-69% range
+      return 69;     // memecoins: 69 bins × ~80-100bp = 55-69% range (already at max)
   }
 }
 
@@ -304,6 +305,17 @@ export async function optimizeStrategy(
       confidence: aiRec.confidence,
       reasoning: aiRec.reasoning,
     });
+  }
+
+  // Meteora DLMM: default position account holds 70 bins max (DEFAULT_BIN_PER_POSITION=70)
+  // Cap at 69 to stay within single position limits
+  const MAX_BINS = 69;
+  if (binRangeWidth > MAX_BINS) {
+    logger.info('Capping bin range to Meteora max', {
+      requested: binRangeWidth,
+      capped: MAX_BINS,
+    });
+    binRangeWidth = MAX_BINS;
   }
 
   const { minBinId, maxBinId } = computeSingleSidedBinRange(
