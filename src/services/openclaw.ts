@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { ScoredPool, AgentMode, StrategyName } from '../types';
+import type { RebalanceContext } from '../agent/strategy-optimizer';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
@@ -215,12 +216,13 @@ Respond with ONLY this JSON structure:
  */
 export async function aiRecommendStrategy(
   pool: ScoredPool,
-  activeBinId: number
+  activeBinId: number,
+  rebalanceCtx?: RebalanceContext
 ): Promise<AIStrategyRecommendation | null> {
   if (!config.openclaw.enabled) return null;
 
-  // Check cache
-  const cacheKey = `${pool.address}:${activeBinId}`;
+  // Check cache — include rebalance info in key so rebalance gets fresh analysis
+  const cacheKey = `${pool.address}:${activeBinId}:${rebalanceCtx ? 'rebal' : 'new'}`;
   const cached = getCached(strategyCache, cacheKey);
   if (cached) {
     logger.info('AI strategy cache hit');
@@ -230,6 +232,29 @@ export async function aiRecommendStrategy(
   try {
     const momentum = pool.volumeMomentum || 0;
     const momentumLabel = momentum >= 0.7 ? 'HOT' : momentum >= 0.4 ? 'RISING' : 'CALM';
+
+    let rebalanceSection = '';
+    if (rebalanceCtx) {
+      const ageMs = Date.now() - new Date(rebalanceCtx.prevCreatedAt).getTime();
+      const ageHours = (ageMs / (1000 * 60 * 60)).toFixed(1);
+      const prevWidth = rebalanceCtx.prevMaxBinId - rebalanceCtx.prevMinBinId;
+
+      let direction = 'unknown';
+      if (activeBinId > rebalanceCtx.prevMaxBinId) direction = 'UP (price rose above range)';
+      else if (activeBinId < rebalanceCtx.prevMinBinId) direction = 'DOWN (price fell below range)';
+
+      rebalanceSection = `
+## REBALANCE CONTEXT (CRITICAL — previous position went out of range)
+- Previous range: bins ${rebalanceCtx.prevMinBinId} to ${rebalanceCtx.prevMaxBinId} (${prevWidth} bins)
+- Previous position age: ${ageHours} hours
+- Price moved: ${direction}
+- Current active bin: ${activeBinId} (moved past the old range)
+- Times rebalanced: ${rebalanceCtx.rebalanceCount}
+
+The previous range of ${prevWidth} bins was TOO NARROW. The price broke out in ${ageHours} hours.
+You MUST recommend a SIGNIFICANTLY WIDER range. At minimum ${Math.round(prevWidth * 1.5)} bins, ideally ${Math.round(prevWidth * 2)}+ bins.
+The faster the breakout (fewer hours), the wider you should go.`;
+    }
 
     const prompt = `Recommend an LP strategy for this Meteora DLMM pool.
 
@@ -244,8 +269,10 @@ Fee APR: ${pool.feeApr.toFixed(1)}%
 Liquidity: $${Math.round(pool.liquidity)}
 SOL Side: ${pool.solSide}
 Volume Momentum: ${momentum.toFixed(2)} (${momentumLabel})
+${rebalanceSection}
 
 IMPORTANT: For ${momentumLabel} tokens, recommend WIDER bin ranges to avoid going out of range.
+${rebalanceCtx ? 'THIS IS A REBALANCE — the previous range was too narrow. Go MUCH wider.' : ''}
 - Spot: 50-70 bins (widen for momentum)
 - Curve: 35-50 bins (widen for momentum)
 - BidAsk: 25-42 bins (widen for momentum)
@@ -265,7 +292,7 @@ Respond with ONLY this JSON:
     }
 
     // Validate bin range
-    if (result.binRangeWidth < 4 || result.binRangeWidth > 150) {
+    if (result.binRangeWidth < 4 || result.binRangeWidth > 250) {
       logger.warn('AI returned out-of-range bin width', { width: result.binRangeWidth });
       return null;
     }

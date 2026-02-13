@@ -113,12 +113,87 @@ function computeSingleSidedBinRange(
 }
 
 /**
+ * Context from a previous position, used during rebalance to learn and adapt.
+ */
+export interface RebalanceContext {
+  prevMinBinId: number;
+  prevMaxBinId: number;
+  prevCreatedAt: Date;
+  prevActiveBinId?: number; // active bin when previous position was created (approx)
+  rebalanceCount: number;
+}
+
+/**
+ * Apply rebalance-aware widening based on how the previous position performed.
+ *
+ * If the position went out of range quickly, the price is moving fast in one direction.
+ * We widen the range proportionally to how fast it went out of range.
+ */
+function applyRebalanceWidening(
+  baseWidth: number,
+  ctx: RebalanceContext,
+  currentActiveBinId: number,
+): number {
+  const prevWidth = ctx.prevMaxBinId - ctx.prevMinBinId;
+  const ageMs = Date.now() - new Date(ctx.prevCreatedAt).getTime();
+  const ageHours = ageMs / (1000 * 60 * 60);
+
+  // Calculate how far the price moved past the old range
+  let overshoot = 0;
+  if (currentActiveBinId > ctx.prevMaxBinId) {
+    overshoot = currentActiveBinId - ctx.prevMaxBinId;
+  } else if (currentActiveBinId < ctx.prevMinBinId) {
+    overshoot = ctx.prevMinBinId - currentActiveBinId;
+  }
+
+  let multiplier = 1.0;
+
+  // If out of range within 1 hour → very aggressive widening (2.5x)
+  // Within 4 hours → strong widening (2x)
+  // Within 12 hours → moderate widening (1.5x)
+  if (ageHours < 1) {
+    multiplier = 2.5;
+  } else if (ageHours < 4) {
+    multiplier = 2.0;
+  } else if (ageHours < 12) {
+    multiplier = 1.5;
+  } else {
+    multiplier = 1.2;
+  }
+
+  // Additional widening based on overshoot relative to old range
+  if (prevWidth > 0 && overshoot > 0) {
+    const overshootRatio = overshoot / prevWidth;
+    // If price overshot by more than the entire old range, widen even more
+    if (overshootRatio > 1.0) {
+      multiplier *= 1.3;
+    } else if (overshootRatio > 0.5) {
+      multiplier *= 1.15;
+    }
+  }
+
+  // Additional widening if this is a repeated rebalance
+  if (ctx.rebalanceCount >= 2) {
+    multiplier *= 1.2; // each repeated rebalance widens more
+  }
+
+  const widened = Math.round(baseWidth * multiplier);
+
+  return widened;
+}
+
+/**
  * Main optimization function: given a scored pool, determine the optimal
  * strategy configuration for a single-sided SOL LP position.
  *
  * Uses momentum-aware widening to handle trending tokens better.
+ * When rebalanceCtx is provided, also factors in how the previous position
+ * performed (how fast it went out of range, price direction, rebalance count).
  */
-export async function optimizeStrategy(pool: ScoredPool): Promise<StrategyConfig> {
+export async function optimizeStrategy(
+  pool: ScoredPool,
+  rebalanceCtx?: RebalanceContext
+): Promise<StrategyConfig> {
   const meteora = getMeteoraService();
 
   // Load the on-chain pool to get current active bin
@@ -133,15 +208,39 @@ export async function optimizeStrategy(pool: ScoredPool): Promise<StrategyConfig
   const momentum = pool.volumeMomentum || 0;
   let binRangeWidth = applyMomentumWidening(baseWidth, momentum);
 
+  // If rebalancing, apply additional widening based on previous position performance
+  if (rebalanceCtx) {
+    const prevWidth = rebalanceCtx.prevMaxBinId - rebalanceCtx.prevMinBinId;
+    const ageMs = Date.now() - new Date(rebalanceCtx.prevCreatedAt).getTime();
+    const ageHours = ageMs / (1000 * 60 * 60);
+
+    binRangeWidth = applyRebalanceWidening(binRangeWidth, rebalanceCtx, activeBinId);
+
+    logger.info('Rebalance-aware widening applied', {
+      pool: pool.name,
+      prevWidth,
+      ageHours: ageHours.toFixed(1),
+      rebalanceCount: rebalanceCtx.rebalanceCount,
+      newWidth: binRangeWidth,
+    });
+  }
+
   // Ask OpenClaw AI for recommendation (falls back to rule-based if unavailable)
-  const aiRec = await aiRecommendStrategy(pool, activeBinId);
+  const aiRec = await aiRecommendStrategy(pool, activeBinId, rebalanceCtx);
   if (aiRec) {
     strategyType = aiRec.strategyType;
-    binRangeWidth = aiRec.binRangeWidth;
+    // For rebalance: use the max of AI recommendation and our rebalance-widened width
+    // This ensures the AI can't accidentally pick a narrower range than what we know is needed
+    if (rebalanceCtx) {
+      binRangeWidth = Math.max(aiRec.binRangeWidth, binRangeWidth);
+    } else {
+      binRangeWidth = aiRec.binRangeWidth;
+    }
     logger.info('Using OpenClaw AI strategy', {
       pool: pool.name,
       strategy: aiRec.strategyType,
-      binWidth: aiRec.binRangeWidth,
+      binWidth: binRangeWidth,
+      aiBinWidth: aiRec.binRangeWidth,
       confidence: aiRec.confidence,
       reasoning: aiRec.reasoning,
     });
@@ -173,6 +272,7 @@ export async function optimizeStrategy(pool: ScoredPool): Promise<StrategyConfig
     binCount: strategyConfig.binRange,
     priceRange: `~${priceRangePercent}%`,
     aiPowered: !!aiRec,
+    isRebalance: !!rebalanceCtx,
   });
 
   return strategyConfig;

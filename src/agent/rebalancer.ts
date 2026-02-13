@@ -20,6 +20,8 @@ interface PositionRecord {
   maxBinId: number;
   mode: string;
   sessionId: string | null;
+  createdAt: Date;
+  rebalanceCount: number;
 }
 
 /**
@@ -114,8 +116,13 @@ export async function rebalancePosition(
       });
     }
 
-    // Step 3: Create new position at optimal range
-    const strategy = await optimizeStrategy(targetPool);
+    // Step 3: Create new position at optimal range (with rebalance context for smarter widening)
+    const strategy = await optimizeStrategy(targetPool, {
+      prevMinBinId: position.minBinId,
+      prevMaxBinId: position.maxBinId,
+      prevCreatedAt: position.createdAt,
+      rebalanceCount: position.rebalanceCount,
+    });
     const newPool = await meteora.getPool(targetPool.address);
     const solAmountLamports = solToLamports(position.solDeposited);
 

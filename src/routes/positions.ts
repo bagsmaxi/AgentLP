@@ -314,11 +314,20 @@ positionsRouter.post('/:id/rebalance', async (req: Request, res: Response) => {
       return;
     }
 
+    // Build rebalance context so the strategy optimizer can learn from the previous position
+    const rebalanceCtx = {
+      prevMinBinId: position.minBinId,
+      prevMaxBinId: position.maxBinId,
+      prevCreatedAt: position.createdAt,
+      rebalanceCount: position.rebalanceCount,
+    };
+
     const newPosition = await preparePositionTransaction({
       pool,
       solAmount: position.solDeposited,
       walletAddress,
       isRebalance: true,
+      rebalanceCtx,
     });
 
     res.json({

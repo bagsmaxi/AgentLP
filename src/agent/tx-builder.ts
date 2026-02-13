@@ -4,7 +4,7 @@ import { getMeteoraService } from '../services/meteora';
 import { loadKeypair, solToLamports } from '../services/solana';
 import { getDepositFeeSol, createFeeTransferInstruction, recordFee } from '../services/fees';
 import { getSolPrice } from '../services/price-feed';
-import { optimizeStrategy } from './strategy-optimizer';
+import { optimizeStrategy, RebalanceContext } from './strategy-optimizer';
 import { prisma } from '../db';
 import { config } from '../config';
 import { logger } from '../utils/logger';
@@ -118,10 +118,11 @@ export async function preparePositionTransaction(params: {
   solAmount: number;
   walletAddress: string;
   isRebalance?: boolean;
+  rebalanceCtx?: RebalanceContext;
 }): Promise<PreparedTransaction & { depositFeeSol?: number }> {
-  const { pool, solAmount, walletAddress, isRebalance = false } = params;
+  const { pool, solAmount, walletAddress, isRebalance = false, rebalanceCtx } = params;
 
-  const strategy = await optimizeStrategy(pool);
+  const strategy = await optimizeStrategy(pool, rebalanceCtx);
   const userPubkey = new PublicKey(walletAddress);
   const meteora = getMeteoraService();
   const dlmmPool = await meteora.getPool(pool.address);
