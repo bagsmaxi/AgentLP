@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.*
+*.db
+*.db-journal
+keypair.json
+web/.next/
+web/node_modules/
+.next/
+.claude/
+nul

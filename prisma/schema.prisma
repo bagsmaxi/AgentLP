@@ -1,0 +1,117 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Position {
+  id                 String   @id @default(uuid())
+  walletAddress      String
+  poolAddress        String
+  poolName           String
+  pairedTokenMint    String?  // non-SOL token mint for Dexscreener links
+  positionPubkey     String   @unique
+  mode               String   // "normal" | "degen"
+  solDeposited       Float
+  strategy           String   // "Spot" | "Curve" | "BidAsk"
+  minBinId           Int
+  maxBinId           Int
+  status             String   @default("active") // "active" | "closed" | "rebalancing"
+  createdAt          DateTime @default(now())
+  closedAt           DateTime?
+  totalFeesEarned    Float    @default(0)
+  totalRewardsEarned Float    @default(0)
+  rebalanceCount     Int      @default(0)
+  sessionId          String?
+
+  @@index([walletAddress])
+  @@index([status])
+}
+
+model PoolScore {
+  id          String   @id @default(uuid())
+  poolAddress String
+  poolName    String
+  score       Float
+  volume24h   Float
+  fees24h     Float
+  feeApr      Float
+  liquidity   Float
+  binStep     Int
+  scoredAt    DateTime @default(now())
+
+  @@index([poolAddress])
+  @@index([scoredAt])
+}
+
+model PerformanceLog {
+  id         String   @id @default(uuid())
+  positionId String
+  poolAddress String
+  strategy   String
+  binWidth   Int
+  feesEarned Float
+  duration   Int      // seconds
+  solPrice   Float
+  outcome    String   // "profit" | "loss" | "breakeven"
+  loggedAt   DateTime @default(now())
+
+  @@index([poolAddress])
+  @@index([strategy])
+}
+
+model AgentSession {
+  id            String    @id @default(uuid())
+  walletAddress String
+  mode          String    // "assisted" | "auto"
+  solCommitted  Float
+  status        String    @default("running") // "running" | "paused" | "stopped"
+  startedAt     DateTime  @default(now())
+  stoppedAt     DateTime?
+
+  @@index([walletAddress])
+  @@index([status])
+}
+
+model Notification {
+  id            String   @id @default(uuid())
+  walletAddress String
+  type          String   // "out_of_range" | "rebalance_needed" | "fees_milestone" | "position_closed" | "deposit_fee"
+  title         String
+  message       String
+  positionId    String?
+  read          Boolean  @default(false)
+  actionType    String?  // "rebalance" | "withdraw" | null
+  createdAt     DateTime @default(now())
+
+  @@index([walletAddress])
+  @@index([walletAddress, read])
+  @@index([createdAt])
+}
+
+model FeeRecord {
+  id            String   @id @default(uuid())
+  walletAddress String
+  positionId    String?
+  type          String   // "deposit" | "performance"
+  amountSol     Float
+  amountUsd     Float
+  txSignature   String?
+  createdAt     DateTime @default(now())
+
+  @@index([walletAddress])
+}
+
+model LearningWeights {
+  id              String   @id @default(uuid())
+  volumeWeight    Float    @default(0.25)
+  feesWeight      Float    @default(0.30)
+  aprWeight       Float    @default(0.20)
+  liquidityWeight Float    @default(0.10)
+  binStepWeight   Float    @default(0.05)
+  historyWeight   Float    @default(0.10)
+  updatedAt       DateTime @default(now())
+}
