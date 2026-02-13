@@ -353,14 +353,12 @@ export class MeteoraService {
     const tokenXMint = pool.tokenX.publicKey.toBase58();
     const solSide: 'X' | 'Y' = tokenXMint === SOL_MINT ? 'X' : 'Y';
 
-    // activeBin.price = human-readable price of tokenX in tokenY terms
-    // e.g., LIZARD-SOL (X=LIZARD, Y=SOL): price = SOL per LIZARD
-    // e.g., SOL-USDC (X=SOL, Y=USDC): price = USDC per SOL
-    const binPrice = parseFloat(activeBin.price);
-
-    // Token decimals for proper unit conversion
-    const tokenXDecimals = pool.tokenX.mint.decimals;
-    const tokenYDecimals = pool.tokenY.mint.decimals;
+    // activeBin.price is the RAW mathematical price: (1 + binStep/10000)^binId
+    // This is a ratio between raw token units, NOT decimal-adjusted.
+    // 1 raw X unit = rawPrice raw Y units.
+    // Since raw price handles decimal differences implicitly, we only
+    // divide by 1e9 (SOL lamports) to get SOL.
+    const rawPrice = parseFloat(activeBin.price);
 
     for (const pos of userPositions) {
       let totalFeeXRaw = 0;
@@ -380,19 +378,15 @@ export class MeteoraService {
       let feeSol: number;
       if (solSide === 'X') {
         // tokenX is SOL: feeX is in lamports
-        const feeXSol = totalFeeXRaw / Math.pow(10, tokenXDecimals);
-        // tokenY is non-SOL: convert to SOL by dividing by price (price = tokenY per SOL)
-        const feeYSol = binPrice > 0
-          ? (totalFeeYRaw / Math.pow(10, tokenYDecimals)) / binPrice
-          : 0;
+        const feeXSol = totalFeeXRaw / 1e9;
+        // tokenY is non-SOL: convert raw Y → raw X (SOL lamports) via 1/rawPrice
+        const feeYSol = rawPrice > 0 ? (totalFeeYRaw / rawPrice) / 1e9 : 0;
         feeSol = feeXSol + feeYSol;
       } else {
         // tokenY is SOL: feeY is in lamports
-        const feeYSol = totalFeeYRaw / Math.pow(10, tokenYDecimals);
-        // tokenX is non-SOL: convert to SOL by multiplying by price (price = SOL per tokenX)
-        const feeXSol = binPrice > 0
-          ? (totalFeeXRaw / Math.pow(10, tokenXDecimals)) * binPrice
-          : 0;
+        const feeYSol = totalFeeYRaw / 1e9;
+        // tokenX is non-SOL: convert raw X → raw Y (SOL lamports) via rawPrice
+        const feeXSol = (totalFeeXRaw * rawPrice) / 1e9;
         feeSol = feeXSol + feeYSol;
       }
 
