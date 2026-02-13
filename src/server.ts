@@ -3,7 +3,7 @@ import cors from 'cors';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { config } from './config';
-import { initDatabase, closeDatabase } from './db';
+import { initDatabase, closeDatabase, prisma } from './db';
 import { poolsRouter } from './routes/pools';
 import { positionsRouter } from './routes/positions';
 import { agentRouter } from './routes/agent';
@@ -12,6 +12,7 @@ import { notificationsRouter } from './routes/notifications';
 import { getSolBalance } from './services/solana';
 import { getDepositFeeSol } from './services/fees';
 import { startPoolCacheRefresh } from './agent/pool-analyzer';
+import { startMonitoring } from './agent/position-monitor';
 import { logger } from './utils/logger';
 
 const app = express();
@@ -103,6 +104,32 @@ export function broadcastUpdate(walletAddress: string, event: string, data: any)
   }
 }
 
+/**
+ * Resume position monitoring for all wallets that have active positions.
+ * Called on server startup so monitoring survives restarts.
+ */
+async function resumeMonitoringForActivePositions() {
+  try {
+    const activePositions = await prisma.position.findMany({
+      where: { status: 'active' },
+      select: { walletAddress: true },
+      distinct: ['walletAddress'],
+    });
+
+    if (activePositions.length === 0) return;
+
+    for (const { walletAddress } of activePositions) {
+      startMonitoring(walletAddress);
+    }
+
+    logger.info('Resumed monitoring for active wallets', {
+      walletCount: activePositions.length,
+    });
+  } catch (err) {
+    logger.error('Failed to resume monitoring', { error: (err as Error).message });
+  }
+}
+
 // Startup
 async function start() {
   try {
@@ -111,6 +138,9 @@ async function start() {
 
     // Pre-warm pool cache in background
     startPoolCacheRefresh();
+
+    // Auto-resume monitoring for all wallets with active positions
+    resumeMonitoringForActivePositions();
 
     server.listen(config.server.port, () => {
       logger.info(`LPCLAW server running on port ${config.server.port}`);

@@ -14,7 +14,7 @@ export const config = {
   },
 
   monitoring: {
-    intervalMs: parseInt(process.env.MONITOR_INTERVAL_MS || '300000', 10), // 5 min
+    intervalMs: parseInt(process.env.MONITOR_INTERVAL_MS || '120000', 10), // 2 min
     feeClaimThresholdSol: parseFloat(process.env.FEE_CLAIM_THRESHOLD_SOL || '0.01'),
     rebalanceEnabled: process.env.REBALANCE_CHECK_ENABLED !== 'false',
   },
