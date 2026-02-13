@@ -117,8 +117,9 @@ export async function preparePositionTransaction(params: {
   pool: ScoredPool;
   solAmount: number;
   walletAddress: string;
+  isRebalance?: boolean;
 }): Promise<PreparedTransaction & { depositFeeSol?: number }> {
-  const { pool, solAmount, walletAddress } = params;
+  const { pool, solAmount, walletAddress, isRebalance = false } = params;
 
   const strategy = await optimizeStrategy(pool);
   const userPubkey = new PublicKey(walletAddress);
@@ -126,10 +127,15 @@ export async function preparePositionTransaction(params: {
   const dlmmPool = await meteora.getPool(pool.address);
   const solAmountLamports = solToLamports(solAmount);
 
-  // Calculate deposit fee and create transfer instruction
-  const depositFeeSol = await getDepositFeeSol();
-  const feeLamports = solToLamports(depositFeeSol);
-  const feeInstruction = createFeeTransferInstruction(userPubkey, feeLamports);
+  // Skip deposit fee on rebalance — user already paid it on the initial deposit
+  const extraInstructions = [];
+  let depositFeeSol = 0;
+  if (!isRebalance) {
+    depositFeeSol = await getDepositFeeSol();
+    const feeLamports = solToLamports(depositFeeSol);
+    const feeInstruction = createFeeTransferInstruction(userPubkey, feeLamports);
+    extraInstructions.push(feeInstruction);
+  }
 
   const result = await meteora.createPosition({
     pool: dlmmPool,
@@ -137,26 +143,29 @@ export async function preparePositionTransaction(params: {
     solSide: pool.solSide,
     strategy,
     userPubkey,
-    extraInstructions: [feeInstruction],
+    extraInstructions,
+    skipSimulation: isRebalance,
   });
 
   if (!result.serializedTx) {
     throw new Error('Failed to serialize transaction');
   }
 
-  // Record the fee (we'll mark it with the position pubkey later on confirm)
-  const solPrice = await getSolPrice();
-  await recordFee({
-    walletAddress,
-    type: 'deposit',
-    amountSol: depositFeeSol,
-    amountUsd: depositFeeSol * (solPrice || 0),
-  });
+  // Record the fee (skip for rebalance)
+  if (!isRebalance && depositFeeSol > 0) {
+    const solPrice = await getSolPrice();
+    await recordFee({
+      walletAddress,
+      type: 'deposit',
+      amountSol: depositFeeSol,
+      amountUsd: depositFeeSol * (solPrice || 0),
+    });
 
-  logger.info('Deposit fee included in transaction', {
-    feeSol: depositFeeSol.toFixed(6),
-    feeUsd: config.fees.depositFeeUsd,
-  });
+    logger.info('Deposit fee included in transaction', {
+      feeSol: depositFeeSol.toFixed(6),
+      feeUsd: config.fees.depositFeeUsd,
+    });
+  }
 
   return {
     serializedTx: result.serializedTx,

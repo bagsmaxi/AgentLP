@@ -318,6 +318,7 @@ positionsRouter.post('/:id/rebalance', async (req: Request, res: Response) => {
       pool,
       solAmount: position.solDeposited,
       walletAddress,
+      isRebalance: true,
     });
 
     res.json({

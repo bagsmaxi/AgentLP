@@ -76,6 +76,7 @@ export class MeteoraService {
     keypair?: Keypair;
     slippage?: number;
     extraInstructions?: TransactionInstruction[];
+    skipSimulation?: boolean;
   }): Promise<{ signature?: string; serializedTx?: string; positionPubkey: string; blockhash?: string; lastValidBlockHeight?: number }> {
     const {
       pool,
@@ -86,6 +87,7 @@ export class MeteoraService {
       keypair,
       slippage = 100, // 1% default slippage
       extraInstructions = [],
+      skipSimulation = false,
     } = params;
 
     // Generate new position keypair
@@ -151,25 +153,28 @@ export class MeteoraService {
       tx.partialSign(positionKeypair);
 
       // Simulate the transaction to catch errors before sending to client
-      try {
-        const simulation = await conn.simulateTransaction(tx);
-        if (simulation.value.err) {
-          const errStr = JSON.stringify(simulation.value.err);
-          if (errStr.includes('"Custom":1') || errStr.includes('insufficient lamports')) {
-            throw new Error(
-              'Insufficient SOL balance for this transaction. ' +
-              'You need enough SOL for the deposit plus ~0.05 SOL for position account rent, token accounts, and fees. ' +
-              'Try a smaller deposit amount.'
-            );
+      // Skip simulation for rebalance: SOL is still locked in old position at build time
+      if (!skipSimulation) {
+        try {
+          const simulation = await conn.simulateTransaction(tx);
+          if (simulation.value.err) {
+            const errStr = JSON.stringify(simulation.value.err);
+            if (errStr.includes('"Custom":1') || errStr.includes('insufficient lamports')) {
+              throw new Error(
+                'Insufficient SOL balance for this transaction. ' +
+                'You need enough SOL for the deposit plus ~0.05 SOL for position account rent, token accounts, and fees. ' +
+                'Try a smaller deposit amount.'
+              );
+            }
+            throw new Error(`Transaction simulation failed: ${errStr}`);
           }
-          throw new Error(`Transaction simulation failed: ${errStr}`);
+        } catch (simErr: any) {
+          // Re-throw our custom errors, catch simulation infrastructure errors
+          if (simErr.message.includes('Insufficient SOL') || simErr.message.includes('simulation failed')) {
+            throw simErr;
+          }
+          logger.warn('Simulation check skipped (non-critical)', { error: simErr.message });
         }
-      } catch (simErr: any) {
-        // Re-throw our custom errors, catch simulation infrastructure errors
-        if (simErr.message.includes('Insufficient SOL') || simErr.message.includes('simulation failed')) {
-          throw simErr;
-        }
-        logger.warn('Simulation check skipped (non-critical)', { error: simErr.message });
       }
 
       const serialized = serializeTransaction(tx);
