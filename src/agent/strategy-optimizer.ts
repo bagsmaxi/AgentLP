@@ -26,17 +26,20 @@ function classifyVolatility(pool: ScoredPool): VolatilityClass {
  * Price range covered = binRangeWidth × binStep (in basis points)
  * Example: 69 bins × 80bp = 55.2% price range for extreme tokens
  */
-function getBaseBinRangeWidth(volatility: VolatilityClass): number {
-  // Max 69 bins per position (Meteora DEFAULT_BIN_PER_POSITION = 70)
+function getBaseBinRangeWidth(volatility: VolatilityClass, binStep: number): number {
   switch (volatility) {
     case 'low':
       return 60;     // stables: 60 bins × ~1-5bp = 0.6-3% range
     case 'medium':
       return 40;     // major pairs: 40 bins × ~10-25bp = 4-10% range
     case 'high':
-      return 35;     // volatile: 35 bins × ~50-60bp = 17.5-21% range
+      return 50;     // volatile: 50 bins × ~50-60bp = 25-30% range
     case 'extreme':
-      return 69;     // memecoins: 69 bins × ~80-100bp = 55-69% range (already at max)
+      // Memecoins need wide ranges. At binStep 80, each bin = 0.8% price move.
+      // Base of 150 bins × 0.8% = covers ~3.3x pump before going out of range.
+      // For higher binSteps (100+), fewer bins needed for same coverage.
+      if (binStep >= 100) return 120;  // 120 bins × 1% = covers ~3.3x
+      return 150;                       // 150 bins × 0.8% = covers ~3.3x
   }
 }
 
@@ -106,19 +109,21 @@ function applyMomentumWidening(
   let multiplier = 1.0;
 
   if (label === 'PARABOLIC') {
-    // Token is going parabolic — need massive range
-    // For binStep 80: 69 bins * 3.0 = 207 bins = 165% range
-    multiplier = 3.0;
+    // Token going parabolic — need massive range to cover 5-10x moves
+    multiplier = 2.5;
   } else if (label === 'HOT') {
-    // Very active — wide range
-    multiplier = 2.0;
+    // Very active trending — cover 3-5x moves
+    multiplier = 1.8;
   } else if (label === 'RISING') {
-    multiplier = 1.5;
+    // Moderately active — cover 2-3x moves
+    multiplier = 1.3;
   }
+  // CALM stays at 1.0 — base width already accounts for typical volatility
 
-  // Extra widening for extreme binStep pools — each bin is a bigger price move
+  // Extra widening for extreme binStep pools (80+) — memecoins can spike any time
+  // Even "calm" memecoins can suddenly pump, so apply minimum 1.0 (base already wide)
   if (binStep >= 80 && multiplier > 1.0) {
-    multiplier *= 1.2;
+    multiplier *= 1.15;
   }
 
   return Math.round(baseWidth * multiplier);
@@ -265,7 +270,7 @@ export async function optimizeStrategy(
   // Classify volatility and compute momentum
   const volatility = classifyVolatility(pool);
   let strategyType = selectStrategy(volatility);
-  const baseWidth = getBaseBinRangeWidth(volatility);
+  const baseWidth = getBaseBinRangeWidth(volatility, pool.binStep);
 
   const { momentum, label: momentumLabel } = calcEffectiveMomentum(pool);
   let binRangeWidth = applyMomentumWidening(baseWidth, momentum, momentumLabel, pool.binStep);
@@ -360,7 +365,7 @@ export function quickClassify(pool: ScoredPool): {
   suggestedBinWidth: number;
 } {
   const volatility = classifyVolatility(pool);
-  const baseWidth = getBaseBinRangeWidth(volatility);
+  const baseWidth = getBaseBinRangeWidth(volatility, pool.binStep);
   const { momentum, label } = calcEffectiveMomentum(pool);
   return {
     volatility,
