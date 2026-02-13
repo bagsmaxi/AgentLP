@@ -65,12 +65,12 @@ const LPCLAW_SYSTEM_PROMPT = `You are the LPCLAW AI analyst — an expert in Met
 - Curve (ID 1): Bell curve around active price. Best for medium-vol pairs (binStep 6-30). Bin width: 35-50
 - BidAsk (ID 2): Concentrated on one side. Best for high-vol/memecoins (binStep 31+). Bin width: 25-42
 
-## Volume Momentum
-- volumeMomentum 0-1 measures how active a token is right now (4h volume vs 24h ratio)
-- momentum >= 0.7 = HOT (very active, trending) → widen bin range by ~40% to stay in range
-- momentum >= 0.4 = RISING (moderately active) → widen bin range by ~20%
-- momentum < 0.4 = CALM → use base bin range
-- For trending tokens, ALWAYS recommend wider ranges to avoid going out of range quickly
+## Volume Momentum (multi-signal: 1h intensity, 4h intensity, APR, volume/liquidity ratio)
+- PARABOLIC (momentum >= 0.8): Token ripping — need 150%+ price range coverage. Recommend 150-250 bins for extreme binStep pools
+- HOT (momentum >= 0.5): Very active trending — need wide range. Recommend 100-180 bins for high binStep
+- RISING (momentum >= 0.3): Moderately active — wider than base. Recommend 50-100 bins
+- CALM: Use base bin range
+- For memecoins with binStep 80+, ALWAYS use very wide ranges (100+ bins minimum)
 
 ## Pool Health Evaluation
 Positive: High volume relative to liquidity, consistent fees, reasonable APR, deep liquidity
@@ -273,9 +273,14 @@ ${rebalanceSection}
 
 IMPORTANT: For ${momentumLabel} tokens, recommend WIDER bin ranges to avoid going out of range.
 ${rebalanceCtx ? 'THIS IS A REBALANCE — the previous range was too narrow. Go MUCH wider.' : ''}
-- Spot: 50-70 bins (widen for momentum)
+For binStep ${pool.binStep} pools:
+${pool.binStep >= 60 ? `- This is an EXTREME volatility pool (memecoin). Minimum 69 bins baseline.
+- PARABOLIC: 150-250 bins (120-200% price range)
+- HOT: 100-180 bins
+- RISING: 69-100 bins
+- CALM: 69 bins` : `- Spot: 50-70 bins (widen for momentum)
 - Curve: 35-50 bins (widen for momentum)
-- BidAsk: 25-42 bins (widen for momentum)
+- BidAsk: 25-42 bins (widen for momentum)`}
 
 Respond with ONLY this JSON:
 {"strategyType":"Spot|Curve|BidAsk","binRangeWidth":30,"reasoning":"brief","confidence":0.80}`;
