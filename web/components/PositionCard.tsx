@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { CheckCircle, AlertTriangle, RefreshCw, Loader2, AlertCircle, LogOut, ExternalLink } from 'lucide-react';
-import { closePosition, confirmClosePosition, rebalancePosition, confirmRebalance } from '@/lib/api';
+import { closePosition, confirmClosePosition, rebalancePosition, confirmRebalance, swapToSol } from '@/lib/api';
 
 interface PositionCardProps {
   position: {
@@ -27,7 +27,7 @@ interface PositionCardProps {
   onClosed?: () => void;
 }
 
-type CloseStatus = 'idle' | 'loading' | 'signing' | 'confirming' | 'done' | 'error';
+type CloseStatus = 'idle' | 'loading' | 'signing' | 'confirming' | 'swapping' | 'signing_swap' | 'done' | 'error';
 type RebalanceStatus = 'idle' | 'loading' | 'signing_close' | 'signing_new' | 'confirming' | 'done' | 'error';
 
 export function PositionCard({ position, onClosed }: PositionCardProps) {
@@ -84,6 +84,34 @@ export function PositionCard({ position, onClosed }: PositionCardProps) {
       }
 
       await confirmClosePosition(position.id, publicKey.toBase58());
+
+      // Auto-swap non-SOL tokens to SOL (100% SOL rewards)
+      setCloseStatus('swapping');
+      try {
+        const swapData = await swapToSol(position.id, publicKey.toBase58());
+        if (swapData.serializedTx && !swapData.noSwapNeeded) {
+          setCloseStatus('signing_swap');
+          const swapBuffer = Buffer.from(swapData.serializedTx, 'base64');
+
+          // Jupiter may return a VersionedTransaction — detect by checking first byte
+          // VersionedTransaction starts with a version byte (0x80), legacy Transaction doesn't
+          let swapSig: string;
+          if (swapBuffer[0] & 0x80) {
+            // VersionedTransaction — use sendRawTransaction
+            const { VersionedTransaction: VTx } = await import('@solana/web3.js');
+            const vtx = VTx.deserialize(swapBuffer);
+            swapSig = await connection.sendRawTransaction(swapBuffer, { maxRetries: 3 });
+          } else {
+            const swapTx = Transaction.from(swapBuffer);
+            swapSig = await sendTransaction(swapTx, connection, { maxRetries: 3 });
+          }
+
+          await connection.confirmTransaction(swapSig, 'confirmed');
+        }
+      } catch (swapErr: any) {
+        // Swap failure is non-critical — position is already closed
+        console.warn('Token-to-SOL swap failed (non-critical):', swapErr.message);
+      }
 
       setCloseStatus('done');
       onClosed?.();
@@ -150,7 +178,7 @@ export function PositionCard({ position, onClosed }: PositionCardProps) {
     }
   };
 
-  const isClosing = closeStatus === 'loading' || closeStatus === 'signing' || closeStatus === 'confirming';
+  const isClosing = closeStatus === 'loading' || closeStatus === 'signing' || closeStatus === 'confirming' || closeStatus === 'swapping' || closeStatus === 'signing_swap';
   const isRebalancing = rebalanceStatus === 'loading' || rebalanceStatus === 'signing_close' || rebalanceStatus === 'signing_new' || rebalanceStatus === 'confirming';
   const showCloseButton = position.status === 'active' && closeStatus !== 'done' && !isRebalancing;
   const showRebalanceButton = position.status === 'active' && closeStatus !== 'done' && rebalanceStatus !== 'done' && !isClosing;
@@ -270,7 +298,11 @@ export function PositionCard({ position, onClosed }: PositionCardProps) {
                     ? 'Preparing...'
                     : closeStatus === 'signing'
                     ? 'Approve in wallet...'
-                    : 'Confirming...'}
+                    : closeStatus === 'confirming'
+                    ? 'Confirming...'
+                    : closeStatus === 'swapping'
+                    ? 'Converting to SOL...'
+                    : 'Approve swap...'}
                 </>
               ) : (
                 <>
@@ -287,7 +319,7 @@ export function PositionCard({ position, onClosed }: PositionCardProps) {
       {closeStatus === 'done' && (
         <div className="mt-4 p-3 rounded-xl text-sm bg-green-900/15 border border-green-500/20 text-green-300 flex items-center gap-2">
           <CheckCircle size={14} />
-          Position closed. SOL returned to your wallet.
+          Position closed. All tokens converted to SOL and returned to your wallet.
         </div>
       )}
 

@@ -5,6 +5,7 @@ import { buildAndExecutePosition, preparePositionTransaction, confirmPosition, p
 import { analyzeAndRankPools } from '../agent/pool-analyzer';
 import { getSolBalance } from '../services/solana';
 import { getMeteoraService } from '../services/meteora';
+import { prepareSwapToSol, getNonSolMint } from '../services/jupiter';
 import { createNotification } from './notifications';
 import { ApiResponse, CreatePositionRequest, AgentMode } from '../types';
 import { logger } from '../utils/logger';
@@ -392,6 +393,67 @@ positionsRouter.post('/:id/rebalance-confirm', async (req: Request, res: Respons
 
     res.json({ success: true });
   } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * POST /api/positions/:id/swap-to-sol
+ * After closing/withdrawing a position, swap any remaining non-SOL tokens to SOL.
+ * Returns a serialized Jupiter swap transaction for the frontend to sign.
+ *
+ * Body: { walletAddress: string }
+ */
+positionsRouter.post('/:id/swap-to-sol', async (req: Request, res: Response) => {
+  try {
+    const positionId = req.params.id;
+    const { walletAddress } = req.body;
+
+    if (!walletAddress) {
+      res.status(400).json({ success: false, error: 'walletAddress is required' });
+      return;
+    }
+
+    const position = await prisma.position.findUnique({
+      where: { id: positionId },
+    });
+    if (!position) {
+      res.status(404).json({ success: false, error: 'Position not found' });
+      return;
+    }
+
+    // Determine the non-SOL token mint from the pool data
+    const meteora = getMeteoraService();
+    const pool = await meteora.getPool(position.poolAddress);
+    const mintX = pool.tokenX.publicKey.toBase58();
+    const mintY = pool.tokenY.publicKey.toBase58();
+    const nonSolMint = getNonSolMint(mintX, mintY);
+
+    // Prepare Jupiter swap to convert non-SOL token → SOL
+    const swapResult = await prepareSwapToSol({
+      walletAddress,
+      tokenMint: nonSolMint,
+    });
+
+    if (!swapResult) {
+      res.json({
+        success: true,
+        data: { noSwapNeeded: true, message: 'No non-SOL tokens to swap' },
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        serializedTx: swapResult.serializedTx,
+        tokenMint: nonSolMint,
+        inputAmount: swapResult.inputAmount,
+        expectedOutputSol: swapResult.expectedOutputSol,
+      },
+    });
+  } catch (err) {
+    logger.error('Swap-to-SOL failed', { error: (err as Error).message });
     res.status(500).json({ success: false, error: (err as Error).message });
   }
 });

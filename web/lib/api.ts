@@ -120,6 +120,20 @@ export const confirmRebalance = (positionId: string, body: {
   body: JSON.stringify(body),
 });
 
+// Swap non-SOL token to SOL after withdraw/close
+export const swapToSol = (positionId: string, walletAddress: string) =>
+  apiFetch<{
+    serializedTx?: string;
+    noSwapNeeded?: boolean;
+    tokenMint?: string;
+    inputAmount?: string;
+    expectedOutputSol?: number;
+    message?: string;
+  }>(`/api/positions/${positionId}/swap-to-sol`, {
+    method: 'POST',
+    body: JSON.stringify({ walletAddress }),
+  });
+
 // Notifications
 export const fetchNotifications = (wallet: string, unreadOnly = false) =>
   apiFetch<any[]>(`/api/notifications?wallet=${wallet}${unreadOnly ? '&unreadOnly=true' : ''}`);
